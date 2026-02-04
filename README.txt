@@ -1,7 +1,13 @@
+DEPLOYMENT (Streamlit Cloud)
+1) Upload these files to GitHub repo root:
+   - app.py
+   - requirements.txt
+2) Go to https://share.streamlit.io/deploy
+3) Select repo + branch main
+4) Main file path: app.py
+5) Deploy
 
-HOW TO DEPLOY STREAMLIT APP
-
-1. Go to https://share.streamlit.io/deploy
-2. Upload this project ZIP
-3. Click Deploy
-4. App goes LIVE
+NOTES
+- Type simple symbols: RELIANCE, TCS, INFY, AAPL
+- App will try: SYMBOL, SYMBOL.NS, SYMBOL.BO
+- Scores are rule-based, for decision support.
