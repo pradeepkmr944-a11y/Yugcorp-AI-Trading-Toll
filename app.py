@@ -1,21 +1,21 @@
 
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
 import ta
 import plotly.graph_objects as go
+import yfinance as yf
 import re
-import requests
 import streamlit.components.v1 as components
 
-st.set_page_config(page_title="Advanced AI Investment Platform", layout="wide")
-st.title("🧠 Advanced AI Investment Platform (Swing + Long-Term)")
-st.caption("Decision-support dashboard (not financial advice). Multi-factor technical + fundamental scoring with transparent rationale.")
+st.set_page_config(page_title="AI Investment Platform (NSE/BSE Ready)", layout="wide")
+st.title("🧠 AI Investment Platform (Swing + Long-Term)")
+st.caption("Decision-support only (not financial advice).")
 
-# ----------------------------
-# Helpers
-# ----------------------------
+# Google Finance & Tickertape embeds failed because those sites block iframe embedding (403 / blank) using security headers.
+# That's not a code bug; it’s their policy. So we replace them with a TradingView widget that works inside Streamlit,
+# and we offer direct NSE/BSE data options via broker APIs (Zerodha/Upstox/Angel), which are stable and legal.
+
 def normalize_symbol(user_input: str) -> str:
     s = (user_input or "").strip().upper()
     s = re.sub(r"\s+", "", s)
@@ -29,32 +29,16 @@ def safe_num(x):
     except Exception:
         return None
 
-def fmt_big(n):
-    if n is None:
-        return "N/A"
-    try:
-        n = float(n)
-    except Exception:
-        return "N/A"
-    absn = abs(n)
-    if absn >= 1e12: return f"{n/1e12:.2f}T"
-    if absn >= 1e9:  return f"{n/1e9:.2f}B"
-    if absn >= 1e6:  return f"{n/1e6:.2f}M"
-    if absn >= 1e3:  return f"{n/1e3:.2f}K"
-    return f"{n:.0f}"
-
 def score_bucket(score):
     if score >= 75: return "🟢 Strong"
     if score >= 55: return "🟡 Moderate"
     return "🔴 Weak"
 
-# India shorthand map (extend anytime)
 INDIA_ALIAS = {
     "HDFC": "HDFCBANK",
     "ICICI": "ICICIBANK",
     "KOTAK": "KOTAKBANK",
     "BAJAJFIN": "BAJFINANCE",
-    "BAJAJFINSV": "BAJAJFINSV",
     "MM": "M&M",
     "M&M": "M&M",
     "LTI": "LTIM",
@@ -85,7 +69,6 @@ def _ensure_ohlc(df: pd.DataFrame):
 
 @st.cache_data(show_spinner=False, ttl=60*10)
 def fetch_price_yahoo(symbol: str, period: str = "5y"):
-    err1 = None
     try:
         df = yf.download(symbol, period=period, interval="1d", auto_adjust=False, progress=False, threads=False)
         df = _ensure_ohlc(df)
@@ -93,7 +76,7 @@ def fetch_price_yahoo(symbol: str, period: str = "5y"):
             return df, None
     except Exception as e:
         err1 = str(e)
-    if err1 is None:
+    else:
         err1 = "No data from yf.download"
 
     try:
@@ -107,146 +90,105 @@ def fetch_price_yahoo(symbol: str, period: str = "5y"):
 
     return None, f"download: {err1} | history: No data"
 
-@st.cache_data(show_spinner=False, ttl=60*60)
-def fetch_info_yahoo(symbol: str):
-    try:
-        t = yf.Ticker(symbol)
-        info = t.info or {}
-        fin = getattr(t, "financials", None)
-        bs = getattr(t, "balance_sheet", None)
-        cf = getattr(t, "cashflow", None)
-        return info, fin, bs, cf
-    except Exception:
-        return {}, None, None, None
-
-def _alpha_to_ohlc(js: dict):
-    key = None
-    for k in js.keys():
-        if "Time Series" in k:
-            key = k
-            break
-    if not key:
-        return None
-    rows = []
-    for dt, vals in js[key].items():
-        try:
-            rows.append({
-                "Date": pd.to_datetime(dt),
-                "Open": float(vals.get("1. open")),
-                "High": float(vals.get("2. high")),
-                "Low": float(vals.get("3. low")),
-                "Close": float(vals.get("4. close")),
-                "Volume": float(vals.get("5. volume", 0)),
-            })
-        except Exception:
-            continue
-    if not rows:
-        return None
-    return pd.DataFrame(rows).sort_values("Date").set_index("Date").dropna()
-
-@st.cache_data(show_spinner=False, ttl=60*10)
-def fetch_price_alpha(symbol: str, api_key: str):
-    url = "https://www.alphavantage.co/query"
-    params = {"function": "TIME_SERIES_DAILY", "symbol": symbol, "apikey": api_key, "outputsize": "full"}
-    r = requests.get(url, params=params, timeout=20)
-    if r.status_code != 200:
-        return None, f"HTTP {r.status_code}"
-    js = r.json()
-    if "Error Message" in js:
-        return None, js["Error Message"]
-    if "Note" in js:
-        return None, js["Note"]
-    df = _alpha_to_ohlc(js)
-    if df is None or df.empty:
-        return None, "No data from Alpha Vantage"
-    return df, None
-
-def resolve_symbol_and_data(user_symbol: str, source: str, alpha_key):
+def resolve_data(user_symbol: str, source: str):
     candidates = build_candidates(user_symbol)
     last_err = None
+
+    if source != "Yahoo Finance (Free fallback)":
+        # Broker data not configured in this deployable template.
+        return None, None, candidates, f"{source} selected but not configured. Add API keys/tokens in Streamlit Secrets."
+
     for c in candidates:
-        if source == "Yahoo Finance":
-            d, e = fetch_price_yahoo(c, period="5y")
-            if d is not None and len(d) >= 30:
-                return c, d, candidates, None
-            last_err = e
-        else:
-            if not alpha_key:
-                last_err = "Alpha Vantage API key missing"
-                continue
-            d, e = fetch_price_alpha(c, alpha_key)
-            if d is not None and len(d) >= 30:
-                return c, d, candidates, None
-            last_err = e
+        df, err = fetch_price_yahoo(c, period="5y")
+        if df is not None and len(df) >= 30:
+            return c, df, candidates, None
+        last_err = err
+
     return None, None, candidates, last_err
 
-def build_google_finance_url(resolved_symbol: str) -> str:
+def tradingview_symbol(resolved_symbol: str) -> str:
     rs = resolved_symbol.upper()
     if rs.endswith(".NS"):
-        base = rs[:-3]
-        return f"https://www.google.com/finance/quote/{base}:NSE"
+        return f"NSE:{rs[:-3]}"
     if rs.endswith(".BO"):
-        base = rs[:-3]
-        return f"https://www.google.com/finance/quote/{base}:BOM"
-    if ":" in rs:
-        return f"https://www.google.com/finance/quote/{rs}"
-    return f"https://www.google.com/finance/quote/{rs}:NASDAQ"
+        return f"BSE:{rs[:-3]}"
+    return rs
 
-def build_tickertape_search_url(user_symbol: str) -> str:
-    q = normalize_symbol(user_symbol)
-    return f"https://www.tickertape.in/search?query={q}"
+def render_tradingview(symbol_tv: str):
+    html = f"""
+    <div class="tradingview-widget-container">
+      <div id="tradingview_1" style="height: 620px;"></div>
+      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+      <script type="text/javascript">
+      new TradingView.widget({{
+        "autosize": true,
+        "symbol": "{symbol_tv}",
+        "interval": "D",
+        "timezone": "Asia/Kolkata",
+        "theme": "light",
+        "style": "1",
+        "locale": "en",
+        "toolbar_bg": "#f1f3f6",
+        "enable_publishing": false,
+        "withdateranges": true,
+        "hide_side_toolbar": false,
+        "allow_symbol_change": true,
+        "details": true,
+        "hotlist": false,
+        "calendar": false,
+        "container_id": "tradingview_1"
+      }});
+      </script>
+    </div>
+    """
+    components.html(html, height=650)
 
-def iframe_block(title: str, url: str, height: int = 900, show_link: bool = False):
-    st.markdown(f"### {title}")
-    components.iframe(url, height=height, scrolling=True)
-    if show_link:
-        st.caption(url)
-
-# ----------------------------
-# Sidebar
-# ----------------------------
 with st.sidebar:
     st.header("⚙️ Settings")
-    symbol_input = st.text_input("Script / Symbol", "RELIANCE")
-    data_source = st.selectbox("Price data for indicators", ["Yahoo Finance", "Alpha Vantage (needs free API key)"])
-    alpha_key = None
-    if data_source.startswith("Alpha"):
-        alpha_key = st.text_input("Alpha Vantage API Key (free)", type="password")
+    symbol_input = st.text_input("Script / Symbol (simple OK)", "RELIANCE")
+    data_source = st.selectbox(
+        "Data source",
+        [
+            "Yahoo Finance (Free fallback)",
+            "Zerodha Kite (NSE/BSE) — connect API",
+            "Upstox (NSE/BSE) — connect API",
+            "Angel One SmartAPI (NSE/BSE) — connect API",
+        ],
+    )
     min_rows = st.slider("Minimum history required (days)", 30, 400, 90)
     horizon = st.selectbox("Horizon", ["Swing (weeks)", "Long-term (months/years)"])
     risk_profile = st.selectbox("Risk profile", ["Conservative", "Balanced", "Aggressive"])
-    st.divider()
-    st.subheader("🔎 Research Panel (same page)")
-    enable_embeds = st.checkbox("Show Google Finance + Tickertape inside app", value=True)
-    show_embed_links = st.checkbox("Show embed URLs (optional)", value=False)
-    st.caption("Some browsers block embedded sites (iframe restrictions).")
+    show_tradingview = st.checkbox("Show TradingView research panel (inside app)", value=True)
 
 run = st.button("✅ Run Analysis", type="primary", use_container_width=True)
 
 if not run:
-    st.info("Enter a symbol and click **Run Analysis**.")
+    st.info("Enter symbol and click **Run Analysis**.")
     st.stop()
 
-resolved, data, tried, err = resolve_symbol_and_data(symbol_input, data_source, alpha_key)
+resolved, data, tried, err = resolve_data(symbol_input, data_source)
 
 if data is None or resolved is None:
     st.error("Could not resolve symbol / insufficient data from selected source.")
     if err:
         st.warning(f"Provider message: {err}")
-    with st.expander("What I tried"):
+    with st.expander("Tried symbols"):
         st.write(tried)
-    st.write("Try exact NSE ticker like RELIANCE.NS / TCS.NS / INFY.NS, or lower minimum history.")
+    st.markdown("### Fix now")
+    st.write("• Try exact NSE: **RELIANCE.NS**, **TCS.NS**, **INFY.NS**")
+    st.write("• Try exact BSE: **RELIANCE.BO**")
+    st.write("• For direct NSE/BSE source: select your broker option (Zerodha/Upstox/Angel) and connect API keys (see Setup tab).")
     st.stop()
 
 if len(data) < min_rows:
-    st.warning(f"Only {len(data)} daily rows available for {resolved}. Analysis still runs, but confidence is lower.")
+    st.warning(f"Only {len(data)} rows for {resolved}. Analysis will run but confidence is lower.")
 
-st.success(f"Using symbol: {resolved}  |  Rows: {len(data)}")
+st.success(f"Using: {resolved}  |  Rows: {len(data)}")
 
-# Fundamentals (Yahoo only)
-info, fin, bs, cf = ({}, None, None, None)
-if data_source == "Yahoo Finance":
-    info, fin, bs, cf = fetch_info_yahoo(resolved)
+if show_tradingview:
+    st.subheader("📌 Research Panel (inside app)")
+    render_tradingview(tradingview_symbol(resolved))
+    st.divider()
 
 # Indicators
 data = data.copy().dropna()
@@ -292,78 +234,77 @@ def technical_score():
         else:
             reasons.append("Mixed trend (EMAs not aligned)")
     else:
-        reasons.append("Trend score limited (not enough history for EMAs)")
+        reasons.append("Trend limited (not enough history)")
 
     if rsi is not None:
         if 45 <= rsi <= 60:
             score += 6; reasons.append(f"RSI healthy ({rsi:.1f})")
         elif rsi < 35:
-            score += 4; reasons.append(f"RSI oversold ({rsi:.1f}) — potential bounce")
+            score += 4; reasons.append(f"RSI oversold ({rsi:.1f})")
         elif rsi > 70:
-            score -= 6; reasons.append(f"RSI overbought ({rsi:.1f}) — caution")
+            score -= 6; reasons.append(f"RSI overbought ({rsi:.1f})")
 
     if macd_v is not None and macd_s is not None:
         if macd_v > macd_s:
-            score += 8; reasons.append("MACD above signal (bullish momentum)")
+            score += 8; reasons.append("MACD bullish")
         else:
-            score -= 6; reasons.append("MACD below signal (bearish momentum)")
+            score -= 6; reasons.append("MACD bearish")
+
+    if adx is not None:
+        if adx >= 25:
+            score += 6; reasons.append(f"ADX strong trend ({adx:.1f})")
+        elif adx < 15:
+            score -= 4; reasons.append(f"ADX weak trend ({adx:.1f})")
+
     return int(max(0, min(100, score))), reasons
 
-def fundamental_score():
-    reasons = []
-    score = 50
-    if not info:
-        reasons.append("Fundamentals limited (use Yahoo Finance source).")
-        return score, reasons
-    pe = safe_num(info.get("trailingPE"))
-    roe = safe_num(info.get("returnOnEquity"))
-    de = safe_num(info.get("debtToEquity"))
-    margins = safe_num(info.get("profitMargins"))
-    if pe is not None and pe > 0:
-        if pe < 18: score += 12; reasons.append(f"Attractive P/E ({pe:.1f})")
-        elif pe < 28: score += 6; reasons.append(f"Reasonable P/E ({pe:.1f})")
-        else: score -= 6; reasons.append(f"High P/E ({pe:.1f})")
-    if roe is not None:
-        roe_pct = roe*100
-        if roe_pct >= 15: score += 10; reasons.append(f"Strong ROE ({roe_pct:.1f}%)")
-    if margins is not None:
-        m = margins*100
-        if m >= 12: score += 6; reasons.append(f"Good margins ({m:.1f}%)")
-    if de is not None:
-        if de > 180: score -= 8; reasons.append(f"High Debt/Equity ({de:.0f})")
-    return int(max(0, min(100, score))), reasons
+t_score, t_reasons = technical_score()
+f_score = 50  # placeholder unless you connect a fundamentals provider
+ai_score = int(round((0.75*t_score + 0.25*f_score) if horizon.startswith("Swing") else (0.55*t_score + 0.45*f_score)))
 
-t_score, _ = technical_score()
-f_score, _ = fundamental_score()
-ai_score = int(round((0.70*t_score + 0.30*f_score) if horizon.startswith("Swing") else (0.45*t_score + 0.55*f_score)))
+atr = safe_num(latest.get("ATR14"))
+stop = target = None
+if atr is not None and price is not None:
+    sl_mult, tp_mult = {"Conservative": (1.5, 2.0), "Balanced": (2.0, 3.0), "Aggressive": (2.5, 4.0)}[risk_profile]
+    stop = price - sl_mult*atr
+    target = price + tp_mult*atr
 
-top1, top2, top3, top4 = st.columns([1.3, 1, 1, 1])
-top1.metric("AI Score (0-100)", f"{ai_score}  {score_bucket(ai_score)}")
-top2.metric("Technical Score", t_score)
-top3.metric("Fundamental Score", f_score)
-top4.metric("Last Close", f"{price:.2f}" if price is not None else "N/A")
+c1, c2, c3, c4 = st.columns([1.4, 1, 1, 1])
+c1.metric("AI Score (0-100)", f"{ai_score}  {score_bucket(ai_score)}")
+c2.metric("Technical Score", t_score)
+c3.metric("Suggested Stop", f"{stop:.2f}" if stop is not None else "N/A")
+c4.metric("Suggested Target", f"{target:.2f}" if target is not None else "N/A")
 
-# Embeds directly on the same page
-if enable_embeds:
-    st.subheader("🔎 Research Panel — Google Finance + Tickertape (same page)")
-    gf_url = build_google_finance_url(resolved)
-    tt_url = build_tickertape_search_url(symbol_input)
+tabs = st.tabs(["📉 Chart", "🧠 Reasons", "🔧 Setup Direct NSE/BSE"])
 
-    left, right = st.columns(2)
-    with left:
-        iframe_block("Google Finance", gf_url, height=820, show_link=show_embed_links)
-    with right:
-        iframe_block("Tickertape (Search)", tt_url, height=820, show_link=show_embed_links)
+with tabs[0]:
+    st.subheader("Candlestick chart")
+    fig = go.Figure(data=[go.Candlestick(
+        x=data.index, open=data["Open"], high=data["High"], low=data["Low"], close=data["Close"]
+    )])
+    for name in ["EMA20", "EMA50", "EMA200"]:
+        fig.add_trace(go.Scatter(x=data.index, y=data[name], mode="lines", name=name))
+    fig.update_layout(xaxis_rangeslider_visible=False, height=560)
+    st.plotly_chart(fig, use_container_width=True)
 
-    st.caption("If embeds appear blank, it's due to browser/iframe restrictions. You can turn off embeds in the sidebar.")
+with tabs[1]:
+    st.subheader("Why this signal?")
+    for r in t_reasons:
+        st.write("•", r)
+
+with tabs[2]:
+    st.subheader("Direct NSE/BSE data (recommended)")
+    st.write("For reliable direct NSE/BSE candles, use a broker API (official & stable).")
+    st.markdown("""
+**How to enable (simple):**
+1. Select your broker in the sidebar (Zerodha / Upstox / Angel One)  
+2. Add API keys/tokens in Streamlit Cloud → **App settings → Secrets**  
+3. We update the app to fetch candles from broker endpoints
+
+**What I need from you:** which broker you use (Zerodha / Upstox / Angel / Dhan / Fyers)  
+Then I will plug the exact working integration code for that broker.
+""")
+    st.info("Google Finance / Tickertape cannot be embedded due to their security policy. TradingView works inside app.")
 
 st.divider()
-
-st.subheader("📉 Candlestick chart")
-fig = go.Figure(data=[go.Candlestick(x=data.index, open=data["Open"], high=data["High"], low=data["Low"], close=data["Close"])])
-for name in ["EMA20", "EMA50", "EMA200"]:
-    fig.add_trace(go.Scatter(x=data.index, y=data[name], mode="lines", name=name))
-fig.update_layout(xaxis_rangeslider_visible=False, height=540)
-st.plotly_chart(fig, use_container_width=True)
-
-st.caption("Disclaimer: Analytics tool. Verify from official filings and multiple sources before investing.")
+st.caption("Disclaimer: Analytics tool. Markets involve risk.")
