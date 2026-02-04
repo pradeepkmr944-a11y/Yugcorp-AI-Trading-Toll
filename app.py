@@ -11,7 +11,7 @@ import streamlit.components.v1 as components
 
 st.set_page_config(page_title="Advanced AI Investment Platform", layout="wide")
 st.title("🧠 Advanced AI Investment Platform (Swing + Long-Term)")
-st.caption("Decision-support dashboard (not financial advice). Uses multi-factor technical + fundamental scoring with transparent rationale.")
+st.caption("Decision-support dashboard (not financial advice). Multi-factor technical + fundamental scoring with transparent rationale.")
 
 # ----------------------------
 # Helpers
@@ -161,7 +161,7 @@ def fetch_price_alpha(symbol: str, api_key: str):
         return None, "No data from Alpha Vantage"
     return df, None
 
-def resolve_symbol_and_data(user_symbol: str, source: str, alpha_key: str|None):
+def resolve_symbol_and_data(user_symbol: str, source: str, alpha_key):
     candidates = build_candidates(user_symbol)
     last_err = None
     for c in candidates:
@@ -170,7 +170,7 @@ def resolve_symbol_and_data(user_symbol: str, source: str, alpha_key: str|None):
             if d is not None and len(d) >= 30:
                 return c, d, candidates, None
             last_err = e
-        elif source.startswith("Alpha"):
+        else:
             if not alpha_key:
                 last_err = "Alpha Vantage API key missing"
                 continue
@@ -178,20 +178,29 @@ def resolve_symbol_and_data(user_symbol: str, source: str, alpha_key: str|None):
             if d is not None and len(d) >= 30:
                 return c, d, candidates, None
             last_err = e
-        else:
-            # Tickertape is provided as an EMBED view (no scraping)
-            return None, None, candidates, "Tickertape data fetch not supported (embed only)."
     return None, None, candidates, last_err
 
-def render_tickertape_embed(url: str):
-    # Safest integration: embed the official page URL provided by the user (no scraping).
-    # Streamlit Cloud may block some iframes; we also show the link.
-    if not url:
-        st.info("Paste a Tickertape stock page URL to view it here (example: https://www.tickertape.in/stocks/... ).")
-        return
-    st.markdown("If the embed is blocked by the browser, open the link below:")
-    st.markdown(f"- {url}")
-    components.iframe(url, height=900, scrolling=True)
+def build_google_finance_url(resolved_symbol: str) -> str:
+    rs = resolved_symbol.upper()
+    if rs.endswith(".NS"):
+        base = rs[:-3]
+        return f"https://www.google.com/finance/quote/{base}:NSE"
+    if rs.endswith(".BO"):
+        base = rs[:-3]
+        return f"https://www.google.com/finance/quote/{base}:BOM"
+    if ":" in rs:
+        return f"https://www.google.com/finance/quote/{rs}"
+    return f"https://www.google.com/finance/quote/{rs}:NASDAQ"
+
+def build_tickertape_search_url(user_symbol: str) -> str:
+    q = normalize_symbol(user_symbol)
+    return f"https://www.tickertape.in/search?query={q}"
+
+def iframe_block(title: str, url: str, height: int = 900, show_link: bool = False):
+    st.markdown(f"### {title}")
+    components.iframe(url, height=height, scrolling=True)
+    if show_link:
+        st.caption(url)
 
 # ----------------------------
 # Sidebar
@@ -199,19 +208,18 @@ def render_tickertape_embed(url: str):
 with st.sidebar:
     st.header("⚙️ Settings")
     symbol_input = st.text_input("Script / Symbol", "RELIANCE")
-    source = st.selectbox("Data source", ["Yahoo Finance", "Alpha Vantage (needs free API key)", "Tickertape (Embed view)"])
+    data_source = st.selectbox("Price data for indicators", ["Yahoo Finance", "Alpha Vantage (needs free API key)"])
     alpha_key = None
-    if source.startswith("Alpha"):
+    if data_source.startswith("Alpha"):
         alpha_key = st.text_input("Alpha Vantage API Key (free)", type="password")
     min_rows = st.slider("Minimum history required (days)", 30, 400, 90)
     horizon = st.selectbox("Horizon", ["Swing (weeks)", "Long-term (months/years)"])
     risk_profile = st.selectbox("Risk profile", ["Conservative", "Balanced", "Aggressive"])
-    tickertape_url = None
-    if source.startswith("Tickertape"):
-        tickertape_url = st.text_input("Tickertape stock page URL (optional)", "")
-        st.caption("Tickertape has no official free public API. We embed the page instead of scraping, which is more stable and safer.")
     st.divider()
-    st.caption("Examples: RELIANCE / RELIANCE.NS / TCS / INFY / HDFC / AAPL")
+    st.subheader("🔎 Research Panel (same page)")
+    enable_embeds = st.checkbox("Show Google Finance + Tickertape inside app", value=True)
+    show_embed_links = st.checkbox("Show embed URLs (optional)", value=False)
+    st.caption("Some browsers block embedded sites (iframe restrictions).")
 
 run = st.button("✅ Run Analysis", type="primary", use_container_width=True)
 
@@ -219,13 +227,7 @@ if not run:
     st.info("Enter a symbol and click **Run Analysis**.")
     st.stop()
 
-# Tickertape mode: show embed + stop
-if source.startswith("Tickertape"):
-    st.subheader("🧾 Tickertape View (Embedded)")
-    render_tickertape_embed(tickertape_url)
-    st.stop()
-
-resolved, data, tried, err = resolve_symbol_and_data(symbol_input, source, alpha_key)
+resolved, data, tried, err = resolve_symbol_and_data(symbol_input, data_source, alpha_key)
 
 if data is None or resolved is None:
     st.error("Could not resolve symbol / insufficient data from selected source.")
@@ -233,10 +235,7 @@ if data is None or resolved is None:
         st.warning(f"Provider message: {err}")
     with st.expander("What I tried"):
         st.write(tried)
-    st.markdown("### Quick fixes")
-    st.write("• Try exact NSE ticker like **RELIANCE.NS**, **TCS.NS**, **INFY.NS**")
-    st.write("• For HDFC Bank use **HDFCBANK** (or HDFC)")
-    st.write("• Lower **Minimum history required**")
+    st.write("Try exact NSE ticker like RELIANCE.NS / TCS.NS / INFY.NS, or lower minimum history.")
     st.stop()
 
 if len(data) < min_rows:
@@ -244,9 +243,9 @@ if len(data) < min_rows:
 
 st.success(f"Using symbol: {resolved}  |  Rows: {len(data)}")
 
-# Fundamentals
+# Fundamentals (Yahoo only)
 info, fin, bs, cf = ({}, None, None, None)
-if source == "Yahoo Finance":
+if data_source == "Yahoo Finance":
     info, fin, bs, cf = fetch_info_yahoo(resolved)
 
 # Indicators
@@ -273,16 +272,6 @@ else:
 
 data["ADX14"] = ta.trend.ADXIndicator(high=high, low=low, close=close, window=14).adx() if w_ok(14) else np.nan
 data["ATR14"] = ta.volatility.AverageTrueRange(high=high, low=low, close=close, window=14).average_true_range() if w_ok(14) else np.nan
-
-if w_ok(20):
-    bb = ta.volatility.BollingerBands(close=close, window=20, window_dev=2)
-    data["BB_MID"] = bb.bollinger_mavg()
-    data["BB_UP"] = bb.bollinger_hband()
-    data["BB_LOW"] = bb.bollinger_lband()
-else:
-    data["BB_MID"] = np.nan
-    data["BB_UP"] = np.nan
-    data["BB_LOW"] = np.nan
 
 latest = data.iloc[-1]
 price = safe_num(latest.get("Close"))
@@ -318,154 +307,63 @@ def technical_score():
             score += 8; reasons.append("MACD above signal (bullish momentum)")
         else:
             score -= 6; reasons.append("MACD below signal (bearish momentum)")
-    else:
-        reasons.append("MACD limited (not enough history)")
-
-    if adx is not None:
-        if adx >= 25:
-            score += 6; reasons.append(f"ADX strong trend ({adx:.1f})")
-        elif adx < 15:
-            score -= 4; reasons.append(f"ADX weak trend ({adx:.1f})")
     return int(max(0, min(100, score))), reasons
 
 def fundamental_score():
     reasons = []
     score = 50
     if not info:
-        reasons.append("Fundamentals limited (provider didn't return company info).")
+        reasons.append("Fundamentals limited (use Yahoo Finance source).")
         return score, reasons
-
-    def sn(k): return safe_num(info.get(k))
-    pe = sn("trailingPE")
-    roe = sn("returnOnEquity")
-    de = sn("debtToEquity")
-    margins = sn("profitMargins")
-    rev_g = sn("revenueGrowth")
-    earn_g = sn("earningsGrowth")
-    fcf = sn("freeCashflow")
-
+    pe = safe_num(info.get("trailingPE"))
+    roe = safe_num(info.get("returnOnEquity"))
+    de = safe_num(info.get("debtToEquity"))
+    margins = safe_num(info.get("profitMargins"))
     if pe is not None and pe > 0:
         if pe < 18: score += 12; reasons.append(f"Attractive P/E ({pe:.1f})")
         elif pe < 28: score += 6; reasons.append(f"Reasonable P/E ({pe:.1f})")
-        else: score -= 6; reasons.append(f"High P/E ({pe:.1f}) — priced for growth")
-    else:
-        reasons.append("P/E unavailable")
-
+        else: score -= 6; reasons.append(f"High P/E ({pe:.1f})")
     if roe is not None:
         roe_pct = roe*100
         if roe_pct >= 15: score += 10; reasons.append(f"Strong ROE ({roe_pct:.1f}%)")
-        elif roe_pct >= 8: score += 4; reasons.append(f"Decent ROE ({roe_pct:.1f}%)")
-        else: score -= 4; reasons.append(f"Weak ROE ({roe_pct:.1f}%)")
-
     if margins is not None:
         m = margins*100
-        if m >= 12: score += 6; reasons.append(f"Good profit margins ({m:.1f}%)")
-        elif m < 5: score -= 4; reasons.append(f"Low margins ({m:.1f}%)")
-
+        if m >= 12: score += 6; reasons.append(f"Good margins ({m:.1f}%)")
     if de is not None:
-        if de < 80: score += 6; reasons.append(f"Debt/Equity comfortable ({de:.0f})")
-        elif de > 180: score -= 8; reasons.append(f"High Debt/Equity ({de:.0f})")
-
-    if rev_g is not None:
-        rg = rev_g*100
-        if rg >= 12: score += 8; reasons.append(f"Revenue growth strong ({rg:.1f}%)")
-        elif rg < 0: score -= 6; reasons.append(f"Revenue shrinking ({rg:.1f}%)")
-
-    if earn_g is not None:
-        eg = earn_g*100
-        if eg >= 12: score += 8; reasons.append(f"Earnings growth strong ({eg:.1f}%)")
-        elif eg < 0: score -= 6; reasons.append(f"Earnings shrinking ({eg:.1f}%)")
-
-    if fcf is not None:
-        if fcf > 0: score += 4; reasons.append("Positive free cashflow")
-        else: score -= 4; reasons.append("Negative free cashflow")
+        if de > 180: score -= 8; reasons.append(f"High Debt/Equity ({de:.0f})")
     return int(max(0, min(100, score))), reasons
 
-t_score, t_reasons = technical_score()
-f_score, f_reasons = fundamental_score()
+t_score, _ = technical_score()
+f_score, _ = fundamental_score()
+ai_score = int(round((0.70*t_score + 0.30*f_score) if horizon.startswith("Swing") else (0.45*t_score + 0.55*f_score)))
 
-if horizon.startswith("Swing"):
-    ai_score = int(round(0.70*t_score + 0.30*f_score))
-else:
-    ai_score = int(round(0.45*t_score + 0.55*f_score))
-label = score_bucket(ai_score)
-
-atr = safe_num(latest.get("ATR14"))
-stop = target = None
-if atr is not None and price is not None:
-    sl_mult, tp_mult = {"Conservative": (1.5, 2.0), "Balanced": (2.0, 3.0), "Aggressive": (2.5, 4.0)}[risk_profile]
-    stop = price - sl_mult*atr
-    target = price + tp_mult*atr
-
-# UI
 top1, top2, top3, top4 = st.columns([1.3, 1, 1, 1])
-top1.metric("AI Score (0-100)", f"{ai_score}  {label}")
+top1.metric("AI Score (0-100)", f"{ai_score}  {score_bucket(ai_score)}")
 top2.metric("Technical Score", t_score)
 top3.metric("Fundamental Score", f_score)
 top4.metric("Last Close", f"{price:.2f}" if price is not None else "N/A")
 
-tabs = st.tabs(["✅ Overview", "📉 Technical", "📘 Fundamentals", "🔍 Troubleshoot"])
+# Embeds directly on the same page
+if enable_embeds:
+    st.subheader("🔎 Research Panel — Google Finance + Tickertape (same page)")
+    gf_url = build_google_finance_url(resolved)
+    tt_url = build_tickertape_search_url(symbol_input)
 
-with tabs[0]:
-    st.subheader("Why this score?")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("### Technical rationale")
-        for r in t_reasons[:10]:
-            st.write("•", r)
-    with c2:
-        st.markdown("### Fundamental rationale")
-        for r in f_reasons[:12]:
-            st.write("•", r)
+    left, right = st.columns(2)
+    with left:
+        iframe_block("Google Finance", gf_url, height=820, show_link=show_embed_links)
+    with right:
+        iframe_block("Tickertape (Search)", tt_url, height=820, show_link=show_embed_links)
 
-    st.subheader("Swing planning (optional)")
-    c3, c4, c5 = st.columns(3)
-    c3.metric("ATR(14)", f"{atr:.2f}" if atr is not None else "N/A")
-    c4.metric("Suggested Stop", f"{stop:.2f}" if stop is not None else "N/A")
-    c5.metric("Suggested Target", f"{target:.2f}" if target is not None else "N/A")
-
-with tabs[1]:
-    st.subheader("Candlestick chart + EMAs")
-    fig = go.Figure(data=[go.Candlestick(
-        x=data.index, open=data["Open"], high=data["High"], low=data["Low"], close=data["Close"]
-    )])
-    for name in ["EMA20", "EMA50", "EMA200"]:
-        fig.add_trace(go.Scatter(x=data.index, y=data[name], mode="lines", name=name))
-    fig.update_layout(xaxis_rangeslider_visible=False, height=540, margin=dict(l=10,r=10,t=30,b=10))
-    st.plotly_chart(fig, use_container_width=True)
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("RSI (14)")
-        st.line_chart(data["RSI14"])
-    with c2:
-        st.subheader("MACD")
-        st.line_chart(pd.DataFrame({"MACD": data["MACD"], "Signal": data["MACD_SIGNAL"]}))
-
-    st.subheader("Bollinger Bands")
-    if "BB_UP" in data.columns:
-        st.line_chart(pd.DataFrame({"Close": data["Close"], "BB_UP": data["BB_UP"], "BB_MID": data["BB_MID"], "BB_LOW": data["BB_LOW"]}))
-
-with tabs[2]:
-    if not info:
-        st.warning("Fundamentals not available from this provider. Use Yahoo Finance source for fundamentals.")
-    else:
-        st.subheader("Key fundamentals (Yahoo Finance)")
-        colA, colB, colC, colD = st.columns(4)
-        colA.metric("Market Cap", fmt_big(info.get("marketCap")))
-        pe = safe_num(info.get("trailingPE"))
-        colB.metric("P/E", f"{pe:.1f}" if pe is not None else "N/A")
-        pb = safe_num(info.get("priceToBook"))
-        colC.metric("P/B", f"{pb:.2f}" if pb is not None else "N/A")
-        dy = safe_num(info.get("dividendYield"))
-        colD.metric("Dividend Yield", f"{dy*100:.2f}%" if dy is not None else "N/A")
-
-with tabs[3]:
-    st.subheader("Troubleshoot")
-    st.write("Symbols tried:")
-    st.write(tried)
-    st.write("Last provider message:")
-    st.write(err or "N/A")
+    st.caption("If embeds appear blank, it's due to browser/iframe restrictions. You can turn off embeds in the sidebar.")
 
 st.divider()
-st.caption("Disclaimer: Analytics & scoring tool. Markets involve risk. Verify before investing.")
+
+st.subheader("📉 Candlestick chart")
+fig = go.Figure(data=[go.Candlestick(x=data.index, open=data["Open"], high=data["High"], low=data["Low"], close=data["Close"])])
+for name in ["EMA20", "EMA50", "EMA200"]:
+    fig.add_trace(go.Scatter(x=data.index, y=data[name], mode="lines", name=name))
+fig.update_layout(xaxis_rangeslider_visible=False, height=540)
+st.plotly_chart(fig, use_container_width=True)
+
+st.caption("Disclaimer: Analytics tool. Verify from official filings and multiple sources before investing.")
